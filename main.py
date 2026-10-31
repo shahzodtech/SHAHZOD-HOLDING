@@ -17,7 +17,8 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 ADMIN_ID = os.getenv("ADMIN_ID", "")
-AI_MODEL = "gemini-3.8-flash"
+PRIMARY_MODEL = "gemini-2.5-flash"
+FALLBACK_MODEL = "gemini-2.5-pro"
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -32,38 +33,52 @@ KARYERA_PROMPT = "Sen — Bank Karyerasi Mentorsan. Bankdagi o'sish, KPI bajaris
 BIZNES_PROMPT = "Sen — Biznes Strategisan. Bankdan tashqari yangi bizneslar, startaplar va bozor imkoniyatlarini tahlil qilasan."
 EDTECH_PROMPT = "Sen — EdTech PM san. 15-40 yoshlilar uchun ingliz tili o'rgatuvchi Telegram Mini App ilovasi metodikasi va funksiyalariga javob berasan."
 
-# ----------------- AI BILAN ISHLASH FUNKSIYALARI -----------------
+# ----------------- AI BILAN ISHLASH (XATOLARNI USHLASH BILAN) -----------------
+async def call_gemini_safe(contents, system_instruction=None, temperature=0.4):
+    """503 yuklama xatosi berganda qayta urinish va zaxira modelga o'tish"""
+    models_to_try = [PRIMARY_MODEL, FALLBACK_MODEL]
+    config = {"temperature": temperature}
+    if system_instruction:
+        config["system_instruction"] = system_instruction
+
+    last_error = None
+    for model in models_to_try:
+        for attempt in range(3):  # Har bir modelni 3 martagacha qayta sinab ko'radi
+            try:
+                response = client.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=config
+                )
+                return response.text
+            except Exception as e:
+                last_error = e
+                err_str = str(e)
+                if "503" in err_str or "UNAVAILABLE" in err_str:
+                    await asyncio.sleep(2)  # 2 soniya kutib qayta urinadi
+                    continue
+                else:
+                    break
+    raise last_error
+
 async def run_ai(prompt_system: str, text: str) -> str:
-    response = client.models.generate_content(
-        model=AI_MODEL,
-        contents=text,
-        config={"system_instruction": prompt_system, "temperature": 0.4}
-    )
-    return response.text
+    return await call_gemini_safe(contents=text, system_instruction=prompt_system, temperature=0.4)
 
 async def transcribe_voice(audio_bytes: bytes) -> str:
-    """Ovozli xabarni Gemini orqali o'zbek tilidagi matnga aylantirish."""
     audio_part = genai_types.Part.from_bytes(
         data=audio_bytes,
         mime_type="audio/ogg"
     )
     prompt = "Ushbu audio xabarda aytilgan gaplarni aynan o'zbek tilida matn qilib yozib ber. Faqat matnni o'zini yoz, boshqa hech narsa qo'shma."
-    response = client.models.generate_content(
-        model=AI_MODEL,
-        contents=[prompt, audio_part]
-    )
-    return response.text.strip()
+    res_text = await call_gemini_safe(contents=[prompt, audio_part], temperature=0.1)
+    return res_text.strip()
 
 async def orchestrator_decide(user_query: str) -> list:
     router_prompt = f"""Quyidagi topshiriq uchun qaysi mutaxassislar kerak?
 Topshiriq: "{user_query}"
 Faqat kerakli kalit so'zlarni vergul bilan yoz (ortiqcha so'zsiz): MOLIYA, KARYERA, BIZNES, EDTECH"""
-    res = client.models.generate_content(
-        model=AI_MODEL,
-        contents=router_prompt,
-        config={"temperature": 0.1}
-    )
-    return [x.strip() for x in res.text.upper().split(",") if x.strip()]
+    res_text = await call_gemini_safe(contents=router_prompt, temperature=0.1)
+    return [x.strip() for x in res_text.upper().split(",") if x.strip()]
 
 # ----------------- ASOSIY ISHLOV BERISH MANTIQI -----------------
 async def process_task(user_query: str, status_msg: types.Message):
@@ -144,7 +159,7 @@ async def handle_voice(message: types.Message):
     except Exception as e:
         await status_msg.edit_text(f"⚠️ Xatolik: {str(e)}")
 
-# Render portini darhol qoniqtiruvchi web server
+# Render portini ushlab turuvchi web server
 async def start_web_server():
     app = web.Application()
     app.router.add_get("/", lambda r: web.Response(text="Bot muvaffaqiyatli ishlamoqda!"))
@@ -153,7 +168,6 @@ async def start_web_server():
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logging.info(f"Web server port {port} da ishga tushirildi.")
 
 async def main():
     await start_web_server()
