@@ -115,7 +115,6 @@ async def handle_start(message: types.Message):
         "Menga yozma xabar yuborishingiz yoki <b>ovozli xabar (golos)</b> tashlashingiz mumkin. Majlis o'tkazib hisobot beraman!"
     )
 
-# Matnli xabarlar uchun
 @dp.message(F.text)
 async def handle_text(message: types.Message):
     if ADMIN_ID and str(message.from_user.id) != str(ADMIN_ID).strip():
@@ -127,7 +126,6 @@ async def handle_text(message: types.Message):
     except Exception as e:
         await status_msg.edit_text(f"⚠️ Xatolik: {str(e)}")
 
-# Ovozli (golos) xabarlar uchun
 @dp.message(F.voice)
 async def handle_voice(message: types.Message):
     if ADMIN_ID and str(message.from_user.id) != str(ADMIN_ID).strip():
@@ -135,32 +133,30 @@ async def handle_voice(message: types.Message):
 
     status_msg = await message.answer("<i>🎤 Ovozli xabaringiz tinglanmoqda va tahlil qilinmoqda...</i>")
     try:
-        # Telegramdan ovozli faylni yuklab olish
         voice_file = await bot.get_file(message.voice.file_id)
         voice_io = io.BytesIO()
         await bot.download_file(voice_file.file_path, voice_io)
         voice_bytes = voice_io.getvalue()
 
-        # Ovozni matnga aylantirish
         user_query = await transcribe_voice(voice_bytes)
-        
         await status_msg.edit_text(f"<i>🗣 Siz aytdingiz:</i> «{user_query}»\n\n<i>⚙️ Topshiriq bo'yicha agentlar chaqirilmoqda...</i>")
         await process_task(user_query, status_msg)
     except Exception as e:
         await status_msg.edit_text(f"⚠️ Xatolik: {str(e)}")
 
-# Render uchun oddiy web server
-async def web_app():
+# Render portini darhol qoniqtiruvchi web server
+async def start_web_server():
     app = web.Application()
-    app.router.add_get("/", lambda r: web.Response(text="Bot ishlamoqda!"))
+    app.router.add_get("/", lambda r: web.Response(text="Bot muvaffaqiyatli ishlamoqda!"))
     runner = web.AppRunner(app)
     await runner.setup()
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
+    logging.info(f"Web server port {port} da ishga tushirildi.")
 
 async def main():
-    await web_app()
+    await start_web_server()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
