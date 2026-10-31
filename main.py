@@ -13,106 +13,110 @@ from google.genai import types as genai_types
 
 load_dotenv()
 
-# Kalitlar
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 ADMIN_ID = os.getenv("ADMIN_ID", "")
-PRIMARY_MODEL = "gemini-2.5-flash"
-FALLBACK_MODEL = "gemini-2.5-pro"
+PRIMARY_MODEL = "gemini-3.8-flash"
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 # ----------------- AGENTLAR KO'RSATMALARI -----------------
 ORCHESTRATOR_PROMPT = """Sen — foydalanuvchining shaxsiy 'Chief of Staff' (Bosh Boshqaruvchi) agentisan. 
 Foydalanuvchi — bank xodimi va o'zining shaxsiy loyihalarining asoschisi.
-Sening qo'lingda 4 ta mutaxassis bor: MOLIYA, KARYERA, BIZNES, EDTECH.
-Vazifang: kelgan topshiriqni tahlil qilib, tegishli agentlar xulosasini birlashtirish va foydalanuvchiga yagona, lo'nda va amaliy qaror berish."""
+Qo'lingda 4 ta mutaxassis bor: MOLIYA, KARYERA, BIZNES, EDTECH.
+Agentlarning fikrlarini umumlashtirib, aniq harakatlar rejasi va xulosani ber."""
 
-MOLIYA_PROMPT = "Sen — Bosh Hisobchisan. Byudjet, daromad/xarajat, risklar va moliyaviy rentabellikni raqamlar bilan hisoblab berasan."
-KARYERA_PROMPT = "Sen — Bank Karyerasi Mentorsan. Bankdagi o'sish, KPI bajarish va martaba ko'tarilishi bo'yicha maslahat berasan."
-BIZNES_PROMPT = "Sen — Biznes Strategisan. Bankdan tashqari yangi bizneslar, startaplar va bozor imkoniyatlarini tahlil qilasan."
-EDTECH_PROMPT = "Sen — EdTech PM san. 15-40 yoshlilar uchun ingliz tili o'rgatuvchi Telegram Mini App ilovasi metodikasi va funksiyalariga javob berasan."
+AGENTS = {
+    "MOLIYA": "Sen — Bosh Hisobchisan. Byudjet, daromad/xarajat, risklar va moliyaviy rentabellikni raqamlar bilan bahola.",
+    "KARYERA": "Sen — Bank Karyerasi Mentorsan. Bankdagi asosiy ish, o'sish, KPI va vaqt balansi bo'yicha baho ber.",
+    "BIZNES": "Sen — Biznes Strategisan. Bankdan tashqari yangi bizneslar, startaplar va bozor imkoniyatlarini bahola.",
+    "EDTECH": "Sen — EdTech PM san. Ingliz tili o'rgatuvchi Telegram Mini App ilovasi metodikasi va funksiyalariga javob ber."
+}
 
-# ----------------- AI BILAN ISHLASH (XATOLARNI USHLASH BILAN) -----------------
 async def call_gemini_safe(contents, system_instruction=None, temperature=0.4):
-    """503 yuklama xatosi berganda qayta urinish va zaxira modelga o'tish"""
-    models_to_try = [PRIMARY_MODEL, FALLBACK_MODEL]
     config = {"temperature": temperature}
     if system_instruction:
         config["system_instruction"] = system_instruction
 
-    last_error = None
-    for model in models_to_try:
-        for attempt in range(3):  # Har bir modelni 3 martagacha qayta sinab ko'radi
-            try:
-                response = client.models.generate_content(
-                    model=model,
-                    contents=contents,
-                    config=config
-                )
-                return response.text
-            except Exception as e:
-                last_error = e
-                err_str = str(e)
-                if "503" in err_str or "UNAVAILABLE" in err_str:
-                    await asyncio.sleep(2)  # 2 soniya kutib qayta urinadi
-                    continue
-                else:
-                    break
-    raise last_error
-
-async def run_ai(prompt_system: str, text: str) -> str:
-    return await call_gemini_safe(contents=text, system_instruction=prompt_system, temperature=0.4)
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=PRIMARY_MODEL,
+                contents=contents,
+                config=config
+            )
+            return response.text
+        except Exception as e:
+            if attempt == 2:
+                raise e
+            await asyncio.sleep(2)
 
 async def transcribe_voice(audio_bytes: bytes) -> str:
     audio_part = genai_types.Part.from_bytes(
         data=audio_bytes,
         mime_type="audio/ogg"
     )
-    prompt = "Ushbu audio xabarda aytilgan gaplarni aynan o'zbek tilida matn qilib yozib ber. Faqat matnni o'zini yoz, boshqa hech narsa qo'shma."
-    res_text = await call_gemini_safe(contents=[prompt, audio_part], temperature=0.1)
-    return res_text.strip()
+    prompt = "Ushbu ovozli xabarda aytilgan gaplarni aniq o'zbek tilida matn qilib yozib ber. Faqat matnni yoz, ortiqcha izoh qo'shma."
+    res = await call_gemini_safe(contents=[prompt, audio_part], temperature=0.1)
+    return res.strip()
 
-async def orchestrator_decide(user_query: str) -> list:
-    router_prompt = f"""Quyidagi topshiriq uchun qaysi mutaxassislar kerak?
-Topshiriq: "{user_query}"
-Faqat kerakli kalit so'zlarni vergul bilan yoz (ortiqcha so'zsiz): MOLIYA, KARYERA, BIZNES, EDTECH"""
-    res_text = await call_gemini_safe(contents=router_prompt, temperature=0.1)
-    return [x.strip() for x in res_text.upper().split(",") if x.strip()]
-
-# ----------------- ASOSIY ISHLOV BERISH MANTIQI -----------------
-async def process_task(user_query: str, status_msg: types.Message):
-    needed = await orchestrator_decide(user_query)
-    if not needed:
-        needed = ["BIZNES", "MOLIYA"]
-
-    await status_msg.edit_text(f"<i>📋 Majlisga chaqirildi: <b>{', '.join(needed)}</b>...</i>")
-    meeting = {}
-
-    for ag in needed:
-        if "MOLIYA" in ag:
-            meeting["MOLIYA"] = await run_ai(MOLIYA_PROMPT, user_query)
-        elif "KARYERA" in ag:
-            meeting["KARYERA"] = await run_ai(KARYERA_PROMPT, user_query)
-        elif "BIZNES" in ag:
-            meeting["BIZNES"] = await run_ai(BIZNES_PROMPT, user_query)
-        elif "EDTECH" in ag:
-            meeting["EDTECH"] = await run_ai(EDTECH_PROMPT, user_query)
-
-    await status_msg.edit_text("<i>👑 Yakuniy qaror tuzilmoqda...</i>")
+# ----------------- MAJLIS O'TKAZISH MANTIQI -----------------
+async def run_meeting(user_query: str, status_msg: types.Message):
+    await status_msg.edit_text(f"🗣 <b>Sizning topshirig'ingiz:</b>\n«{user_query}»\n\n🏛 <b>Majlis boshlanmoqda...</b>")
     
-    ctx = f"Topshiriq: {user_query}\n" + "\n".join([f"[{k}]: {v}" for k, v in meeting.items()])
-    final_ans = await run_ai(ORCHESTRATOR_PROMPT, f"{ctx}\n\nFoydalanuvchiga yagona yakuniy reja va xulosa taqdim et.")
+    meeting_results = {}
+    
+    # 4 ta agentni parallel ravishda ishga tushirish (tez ishlashi uchun)
+    tasks = []
+    agent_names = list(AGENTS.keys())
+    
+    for name in agent_names:
+        tasks.append(call_gemini_safe(contents=user_query, system_instruction=AGENTS[name], temperature=0.4))
+    
+    await status_msg.edit_text(
+        f"🗣 <b>Topshiriq:</b> «{user_query}»\n\n"
+        "🏛 <b>Majlis zalida muhokama ketmoqda:</b>\n"
+        "⏳ <i>Moliya, Karyera, Biznes va EdTech agentlari tahlil qilmoqda...</i>"
+    )
+    
+    responses = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    for name, resp in zip(agent_names, responses):
+        if isinstance(resp, Exception):
+            meeting_results[name] = "Tahlil jarayonida xatolik yuz berdi."
+        else:
+            meeting_results[name] = resp
 
-    details = "".join([f"\n\n🔹 <b>{k}:</b>\n{v}" for k, v in meeting.items()])
-    res = f"<b>👑 BOSH BOSHQARUVCHI QARORI:</b>\n\n{final_ans}\n\n──────────────────\n<b>📝 MAJLIS TAFSILOTLARI:</b><tg-spoiler>{details}</tg-spoiler>"
+    # Jonli hisobot matnini shakllantirish (yashirmasdan ochiq ko'rsatish)
+    await status_msg.edit_text("🏛 <b>Majlis yakunlandi! Bosh Boshqaruvchi yakuniy xulosani tayyorlamoqda...</b>")
+
+    ctx = f"Topshiriq: {user_query}\n" + "\n".join([f"[{k}]: {v}" for k, v in meeting_results.items()])
+    final_decision = await call_gemini_safe(
+        contents=f"{ctx}\n\nUshbu agentlar fikrlaridan kelib chiqib, Asoschi uchun aniq qadamlar va yakuniy qaror ber.",
+        system_instruction=ORCHESTRATOR_PROMPT,
+        temperature=0.3
+    )
+
+    full_report = (
+        f"🏛 <b>XOLDING KENGASHI MAJLISI BAYONI</b>\n\n"
+        f"🎯 <b>Mavzu:</b> {user_query}\n"
+        f"━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🔹 <b>MOLIYA (Bosh Hisobchi):</b>\n{meeting_results['MOLIYA']}\n\n"
+        f"🔹 <b>KARYERA (Bank Mentori):</b>\n{meeting_results['KARYERA']}\n\n"
+        f"🔹 <b>BIZNES (Biznes Strateg):</b>\n{meeting_results['BIZNES']}\n\n"
+        f"🔹 <b>EDTECH (Mahsulot Menejeri):</b>\n{meeting_results['EDTECH']}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"👑 <b>BOSH BOSHQARUVCHI (CHIEF OF STAFF) QARORI:</b>\n\n{final_decision}"
+    )
 
     await status_msg.delete()
-    if len(res) > 4000:
-        for i in range(0, len(res), 4000):
-            await status_msg.chat.send_message(res[i:i+4000])
+    
+    # Telegram xabar limiti (4096 belgi) dan oshsa bo'lib yuborish
+    if len(full_report) > 4000:
+        for i in range(0, len(full_report), 4000):
+            await status_msg.chat.send_message(full_report[i:i+4000])
     else:
-        await status_msg.chat.send_message(res)
+        await status_msg.chat.send_message(full_report)
 
 # ----------------- TELEGRAM BOT -----------------
 logging.basicConfig(level=logging.INFO)
@@ -126,27 +130,24 @@ async def handle_start(message: types.Message):
         return
     await message.answer(
         "<b>Assalomu alaykum, Hurmatli Asoschi! 👑</b>\n\n"
-        "Barcha 4 ta agentingiz shay holatda.\n"
-        "Menga yozma xabar yuborishingiz yoki <b>ovozli xabar (golos)</b> tashlashingiz mumkin. Majlis o'tkazib hisobot beraman!"
+        "Xolding majlislar zali tayyor. Ovozli xabar yoki yozma topshiriq yuboring — 4 ta mutaxassis o'zaro muhokama qilib, majlis hisobotini to'liq ko'rsatadi!"
     )
 
 @dp.message(F.text)
 async def handle_text(message: types.Message):
     if ADMIN_ID and str(message.from_user.id) != str(ADMIN_ID).strip():
         return
-
-    status_msg = await message.answer("<i>⚙️ Boshqaruvchi: Topshiriq o'rganilmoqda...</i>")
+    status_msg = await message.answer("⏳ <i>Majlis chaqirilmoqda...</i>")
     try:
-        await process_task(message.text, status_msg)
+        await run_meeting(message.text, status_msg)
     except Exception as e:
-        await status_msg.edit_text(f"⚠️ Xatolik: {str(e)}")
+        await status_msg.edit_text(f"⚠️ Xatolik yuz berdi: {str(e)}")
 
 @dp.message(F.voice)
 async def handle_voice(message: types.Message):
     if ADMIN_ID and str(message.from_user.id) != str(ADMIN_ID).strip():
         return
-
-    status_msg = await message.answer("<i>🎤 Ovozli xabaringiz tinglanmoqda va tahlil qilinmoqda...</i>")
+    status_msg = await message.answer("🎤 <i>Ovozli xabaringiz eshitilmoqda...</i>")
     try:
         voice_file = await bot.get_file(message.voice.file_id)
         voice_io = io.BytesIO()
@@ -154,12 +155,10 @@ async def handle_voice(message: types.Message):
         voice_bytes = voice_io.getvalue()
 
         user_query = await transcribe_voice(voice_bytes)
-        await status_msg.edit_text(f"<i>🗣 Siz aytdingiz:</i> «{user_query}»\n\n<i>⚙️ Topshiriq bo'yicha agentlar chaqirilmoqda...</i>")
-        await process_task(user_query, status_msg)
+        await run_meeting(user_query, status_msg)
     except Exception as e:
-        await status_msg.edit_text(f"⚠️ Xatolik: {str(e)}")
+        await status_msg.edit_text(f"⚠️ Xatolik yuz berdi: {str(e)}")
 
-# Render portini ushlab turuvchi web server
 async def start_web_server():
     app = web.Application()
     app.router.add_get("/", lambda r: web.Response(text="Bot muvaffaqiyatli ishlamoqda!"))
