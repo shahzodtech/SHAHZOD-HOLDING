@@ -14,41 +14,41 @@ from google.genai import types as genai_types
 
 load_dotenv()
 
-# Kalitlar
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 ADMIN_ID = os.getenv("ADMIN_ID", "").strip()
 
-# Model zaxira zanjiri (biri band bo'lsa yoki 404 bersa, avtomat keyingisiga o'tadi)
+# Siz talab qilgan barcha modellar kaskadi (navbati bilan tekshiriladi)
 MODELS_CASCADE = [
     "gemini-3.8-flash",
+    "gemini-3.5-flash-lite",
     "gemini-3.1-pro-preview",
-    "gemini-2.5-flash",
-    "gemini-2.0-flash"
+    "argon"
 ]
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# ----------------- AGENTLAR DIREKTIVASI -----------------
+# ----------------- AGENTLAR KO'RSATMALARI -----------------
 ORCHESTRATOR_PROMPT = """Sen — foydalanuvchining shaxsiy 'Chief of Staff' (Bosh Boshqaruvchi) agentisan. 
 Foydalanuvchi — bank xodimi va o'zining shaxsiy loyihalarining asoschisi.
 Qo'lingda 4 ta mutaxassis bor: MOLIYA, KARYERA, BIZNES, EDTECH.
-Vazifang: Agentlar fikrlarini umumlashtirib, foydalanuvchiga amaliy, lo'nda va qat'iy yakuniy qaror hamda qadamlar rejasini berish. Javobda markdown (** yoki #) ishlatma, oddiy va tushunarli matnda yoz."""
+Vazifang: Agentlar fikrlarini umumlashtirib, foydalanuvchiga amaliy, lo'nda va qat'iy yakuniy qaror hamda qadamlar rejasini berish."""
 
 AGENTS = {
-    "MOLIYA": "Sen — Bosh Hisobchisan. Byudjet, daromad/xarajat, risklar va moliyaviy rentabellikni raqamlar bilan qisqa (maksimum 4-5 gapda) va aniq tahlil qil.",
-    "KARYERA": "Sen — Bank Karyerasi Mentorsan. Bankdagi asosiy ish o'rni, martaba ko'tarilishi, KPI va vaqt balansi bo'yicha qisqa (maksimum 4-5 gapda) va aniq baho ber.",
-    "BIZNES": "Sen — Biznes Strategisan. Bankdan tashqari yangi bizneslar, startaplar, bozor imkoniyatlari va risklarni qisqa (maksimum 4-5 gapda) va aniq tahlil qil.",
-    "EDTECH": "Sen — EdTech Mahsulot Menejerisan. Ingliz tili o'rgatuvchi Telegram Mini App ilovasi metodikasi, auditoriyasi va funksiyalariga qisqa (maksimum 4-5 gapda) javob ber."
+    "MOLIYA": "Sen — Bosh Hisobchisan. Byudjet, daromad/xarajat, risklar va moliyaviy rentabellikni raqamlar bilan qisqa (4-5 gapda) tahlil qil.",
+    "KARYERA": "Sen — Bank Karyerasi Mentorsan. Bankdagi asosiy ish, o'sish, KPI va vaqt balansi bo'yicha qisqa (4-5 gapda) baho ber.",
+    "BIZNES": "Sen — Biznes Strategisan. Yangi bizneslar, startaplar va bozor imkoniyatlarini qisqa (4-5 gapda) tahlil qil.",
+    "EDTECH": "Sen — EdTech PM san. Ingliz tili o'rgatuvchi Telegram Mini App ilovasi metodikasi va auditoriyasiga qisqa (4-5 gapda) javob ber."
 }
 
-# ----------------- ISHONCHLI AI CHAQIRUVI (FAILSAFE ENGINE) -----------------
-async def call_gemini_failsafe(contents, system_instruction=None, temperature=0.4) -> str:
+# ----------------- MUSTAHKAM AI CHAQIRUV TIZIMI -----------------
+async def call_gemini_safe(contents, system_instruction=None, temperature=0.4) -> str:
     config = {"temperature": temperature}
     if system_instruction:
         config["system_instruction"] = system_instruction
 
-    last_exception = None
+    last_error = None
+    # Ro'yxatdagi modellar navbatma-navbat tekshiriladi
     for model_name in MODELS_CASCADE:
         for attempt in range(2):
             try:
@@ -60,39 +60,39 @@ async def call_gemini_failsafe(contents, system_instruction=None, temperature=0.
                 )
                 if response and response.text:
                     return response.text.strip()
-            except Exception as exc:
-                last_exception = exc
-                err_text = str(exc).lower()
-                logging.warning(f"Model {model_name} (urinish {attempt+1}) xatosi: {err_text}")
+            except Exception as e:
+                last_error = e
+                err_text = str(e).lower()
+                logging.warning(f"Model {model_name} xatosi: {err_text}")
                 
-                if "404" in err_text or "not_found" in err_text or "not supported" in err_text:
+                # Agar model topilmasa (404) darhol keyingi modelga o'tish
+                if "404" in err_text or "not_found" in err_text or "not available" in err_text:
                     break
-                await asyncio.sleep(2)
-                
-    raise last_exception
+                # Server band (503/429) bo'lsa 1 soniya kutib qayta urinish
+                await asyncio.sleep(1)
 
-async def transcribe_voice_safe(audio_bytes: bytes) -> str:
+    raise last_error
+
+async def transcribe_voice(audio_bytes: bytes) -> str:
     audio_part = genai_types.Part.from_bytes(
         data=audio_bytes,
         mime_type="audio/ogg"
     )
-    prompt = "Ushbu ovozli xabarda aytilgan barcha so'zlarni aynan o'zbek tilida matn holida yozib ber. Boshqa hech qanday izoh qo'shma."
-    return await call_gemini_failsafe(contents=[prompt, audio_part], temperature=0.1)
+    prompt = "Ushbu ovozli xabardagi gaplarni to'liq o'zbek tilida matn qilib yozib ber. Boshqa hech narsa qo'shma."
+    return await call_gemini_safe(contents=[prompt, audio_part], temperature=0.1)
 
 def clean_html(text: str) -> str:
-    """Telegram HTML rejimida xato bermasligi uchun belgilarni tozalash"""
-    cleaned = text.replace("**", "").replace("##", "")
-    return html.escape(cleaned)
+    return html.escape(text.replace("**", "").replace("##", ""))
 
-# ----------------- MAJLISNI BOSHQARISH VA HISOBOT -----------------
+# ----------------- MAJLISNI O'TKAZISH VA KO'RSATISH -----------------
 async def execute_board_meeting(user_query: str, status_msg: types.Message):
     clean_text = user_query.strip().lower()
     short_words = ["salom", "shu yerdamisan", "qalesan", "kim bor", "bosh agent", "assalomu alaykum", "alo"]
     
-    if any(sw in clean_text for sw in short_words) and len(clean_text.split()) <= 5:
-        quick_resp = await call_gemini_failsafe(
+    if any(sw in clean_text for sw in short_words) and len(clean_text.split()) <= 4:
+        quick_resp = await call_gemini_safe(
             contents=user_query,
-            system_instruction=ORCHESTRATOR_PROMPT + "\nFoydalanuvchiga hurmat bilan lo'nda javob qaytar, barcha 4 ta agent majlisga shay ekanini bildir.",
+            system_instruction=ORCHESTRATOR_PROMPT + "\nFoydalanuvchiga hurmat bilan javob ber, agentlar majlisga tayyor ekanini bildir.",
             temperature=0.3
         )
         await status_msg.edit_text(f"👑 <b>Bosh Boshqaruvchi:</b>\n\n{clean_html(quick_resp)}")
@@ -102,12 +102,13 @@ async def execute_board_meeting(user_query: str, status_msg: types.Message):
     await status_msg.edit_text(
         f"🗣 <b>Topshiriq qabul qilindi:</b>\n«{safe_query}»\n\n"
         f"🏛 <b>Majlis chaqirildi!</b>\n"
-        f"⏳ <i>Moliya, Karyera, Biznes va EdTech agentlari o'z xulosalarini tayyorlamoqda...</i>"
+        f"⏳ <i>Moliya, Karyera, Biznes va EdTech agentlari o'z fikrlarini tayyorlamoqda...</i>"
     )
 
+    # 4 ta agent parallel muhokama qiladi
     agent_names = list(AGENTS.keys())
     tasks = [
-        call_gemini_failsafe(contents=user_query, system_instruction=AGENTS[name], temperature=0.4)
+        call_gemini_safe(contents=user_query, system_instruction=AGENTS[name], temperature=0.4)
         for name in agent_names
     ]
     
@@ -116,21 +117,21 @@ async def execute_board_meeting(user_query: str, status_msg: types.Message):
     meeting_results = {}
     for name, resp in zip(agent_names, responses):
         if isinstance(resp, Exception):
-            meeting_results[name] = f"⚠️ Vaqtinchalik javob bera olmadi ({clean_html(str(resp)[:50])})"
+            meeting_results[name] = f"⚠️ Xatolik yuz berdi ({clean_html(str(resp)[:50])})"
         else:
             meeting_results[name] = clean_html(resp)
 
     await status_msg.edit_text(
         f"🗣 <b>Topshiriq:</b> «{safe_query}»\n\n"
-        f"✅ <b>Barcha 4 ta agent fikr bildirdi!</b>\n"
+        f"✅ <b>Barcha agentlar hisobot berdi!</b>\n"
         f"👑 <i>Bosh Boshqaruvchi yakuniy qarorni shakllantirmoqda...</i>"
     )
 
-    ctx = f"Asoschi topshirig'i: {user_query}\n\nAgentlar hisobotlari:\n" + "\n\n".join(
+    ctx = f"Asoschi topshirig'i: {user_query}\n\nAgentlar tahlillari:\n" + "\n\n".join(
         [f"[{k} AGENTI]:\n{v}" for k, v in meeting_results.items()]
     )
-    final_decision_raw = await call_gemini_failsafe(
-        contents=f"{ctx}\n\nBarcha agentlarning fikrlarini tahlil qilib, Asoschiga aniq, qadam-baqadam harakatlar rejasini va yakuniy xulosani taqdim et.",
+    final_decision_raw = await call_gemini_safe(
+        contents=f"{ctx}\n\nBarcha fikrlarni umumlashtirib, Asoschi uchun aniq qadamlar rejasini va qarorni ber.",
         system_instruction=ORCHESTRATOR_PROMPT,
         temperature=0.3
     )
@@ -140,10 +141,10 @@ async def execute_board_meeting(user_query: str, status_msg: types.Message):
         f"🏛 <b>XOLDING KENGASHI MAJLISI BAYONI</b>\n\n"
         f"🎯 <b>Kun tartibidagi masala:</b>\n«{safe_query}»\n"
         f"━━━━━━━━━━━━━━━━━━━\n\n"
-        f"💰 <b>MOLIYA AGENTI (Bosh Hisobchi):</b>\n{meeting_results['MOLIYA']}\n\n"
-        f"🏦 <b>KARYERA AGENTI (Bank Mentori):</b>\n{meeting_results['KARYERA']}\n\n"
-        f"📈 <b>BIZNES AGENTI (Strateg):</b>\n{meeting_results['BIZNES']}\n\n"
-        f"🎓 <b>EDTECH AGENTI (PM):</b>\n{meeting_results['EDTECH']}\n\n"
+        f"💰 <b>MOLIYA (Bosh Hisobchi):</b>\n{meeting_results['MOLIYA']}\n\n"
+        f"🏦 <b>KARYERA (Bank Mentori):</b>\n{meeting_results['KARYERA']}\n\n"
+        f"📈 <b>BIZNES (Strateg):</b>\n{meeting_results['BIZNES']}\n\n"
+        f"🎓 <b>EDTECH (Mahsulot Menejeri):</b>\n{meeting_results['EDTECH']}\n\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"👑 <b>BOSH BOSHQARUVCHI QARORI:</b>\n\n{final_decision}"
     )
@@ -156,7 +157,7 @@ async def execute_board_meeting(user_query: str, status_msg: types.Message):
     else:
         await status_msg.chat.send_message(full_report)
 
-# ----------------- TELEGRAM BOT HANDLERLARI -----------------
+# ----------------- TELEGRAM BOT -----------------
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -168,15 +169,14 @@ async def handle_start(message: types.Message):
         return
     await message.answer(
         "<b>Assalomu alaykum, Hurmatli Asoschi! 👑</b>\n\n"
-        "Xolding majlislar zali to'liq sozlandi.\n"
-        "Menga <b>yozma</b> yoki <b>ovozli xabar (golos)</b> yuboring — 4 ta agentingiz (Moliya, Karyera, Biznes, EdTech) majlis o'tkazib, batafsil hisobot beradi!"
+        "Xolding majlislar zali to'liq shay. Menga <b>yozma</b> yoki <b>ovozli xabar (golos)</b> yuboring — agentlar majlis o'tkazib hisobot beradi!"
     )
 
 @dp.message(F.text)
 async def handle_text(message: types.Message):
     if ADMIN_ID and str(message.from_user.id) != ADMIN_ID:
         return
-    status_msg = await message.answer("⏳ <i>Topshiriq qabul qilindi, tahlil boshlanmoqda...</i>")
+    status_msg = await message.answer("⏳ <i>Topshiriq qabul qilindi...</i>")
     try:
         await execute_board_meeting(message.text, status_msg)
     except Exception as e:
@@ -193,15 +193,15 @@ async def handle_voice(message: types.Message):
         await bot.download_file(voice_file.file_path, voice_io)
         voice_bytes = voice_io.getvalue()
 
-        user_query = await transcribe_voice_safe(voice_bytes)
+        user_query = await transcribe_voice(voice_bytes)
         await execute_board_meeting(user_query, status_msg)
     except Exception as e:
-        await status_msg.edit_text(f"⚠️ Ovozli xabarni o'qishda xatolik: {clean_html(str(e))}")
+        await status_msg.edit_text(f"⚠️ Ovozli xabarni tahlil qilishda xatolik: {clean_html(str(e))}")
 
-# ----------------- RENDER PORT SERVERI -----------------
+# ----------------- RENDER WEB SERVER -----------------
 async def start_web_server():
     app = web.Application()
-    app.router.add_get("/", lambda r: web.Response(text="Shahzod Holding Bot 24/7 ishlamoqda!"))
+    app.router.add_get("/", lambda r: web.Response(text="Shahzod Holding Bot ishlamoqda!"))
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.environ.get("PORT", 10000))
